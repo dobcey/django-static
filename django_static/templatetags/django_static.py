@@ -6,7 +6,8 @@ import stat
 import shutil
 import codecs
 from collections import defaultdict
-from cStringIO import StringIO
+#from cStringIO import StringIO
+from StringIO import StringIO
 from subprocess import Popen, PIPE
 import warnings
 
@@ -415,7 +416,7 @@ def _static_file(filename,
                 else:
                     extension = os.path.splitext(filepath)[1]
                 each_m_times.append(os.stat(filepath)[stat.ST_MTIME])
-                new_file_content.write(open(filepath, 'r').read().strip())
+                new_file_content.write(codecs.open(filepath, 'r', 'utf-8').read().strip())
                 new_file_content.write('\n')
 
             filename = _combine_filenames(filename)
@@ -693,6 +694,16 @@ def _combine_filenames(filenames, max_length=40):
     return os.path.join(path, new_filename)
 
 
+def _unicode_switch(s):
+    """
+    Encode or decode unicode objects using the 'utf-8' codec.
+
+    """
+    if isinstance(s, unicode):
+        return s.encode('utf-8')
+    return s.decode('utf-8')
+
+
 CSS = 'css'
 JS = 'js'
 
@@ -730,7 +741,7 @@ def _run_closure_compiler(jscode):
     cmd = "java -jar %s" % settings.DJANGO_STATIC_CLOSURE_COMPILER
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
-        (stdoutdata, stderrdata) = proc.communicate(jscode)
+        (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(jscode))
     except OSError, msg:
         # see comment on OSErrors inside _run_yui_compressor()
         stderrdata = \
@@ -738,14 +749,14 @@ def _run_closure_compiler(jscode):
     if stderrdata:
         return "/* ERRORS WHEN RUNNING CLOSURE COMPILER\n" + stderrdata + '\n*/\n' + jscode
 
-    return stdoutdata
+    return _unicode_switch(stdoutdata)
 
 def _run_yui_compressor(code, type_):
 
     cmd = "java -jar %s --type=%s" % (settings.DJANGO_STATIC_YUI_COMPRESSOR, type_)
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
-        (stdoutdata, stderrdata) = proc.communicate(code)
+        (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(code))
     except OSError, msg:
         # Sometimes, for unexplicable reasons, you get a Broken pipe when
         # running the popen instance. It's always non-deterministic problem
@@ -757,4 +768,4 @@ def _run_yui_compressor(code, type_):
     if stderrdata:
         return "/* ERRORS WHEN RUNNING YUI COMPRESSOR\n" + stderrdata + '\n*/\n' + code
 
-    return stdoutdata
+    return _unicode_switch(stdoutdata)
