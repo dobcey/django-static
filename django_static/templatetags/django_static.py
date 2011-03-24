@@ -758,7 +758,7 @@ def _run_closure_compiler(jscode):
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
         (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(jscode))
-    except OSError, msg:
+    except OSError, msg: # pragma: no cover
         # see comment on OSErrors inside _run_yui_compressor()
         stderrdata = \
           "OSError: %s. Try again by making a small change and reload" % msg
@@ -775,7 +775,7 @@ def _run_yui_compressor(code, type_):
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
         (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(code))
-    except OSError, msg:
+    except OSError, msg: # pragma: no cover
         # Sometimes, for unexplicable reasons, you get a Broken pipe when
         # running the popen instance. It's always non-deterministic problem
         # so it probably has something to do with concurrency or something
