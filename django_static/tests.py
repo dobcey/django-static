@@ -19,12 +19,18 @@ def _slim_file(x, symlink_if_possible=False,):
                         symlink_if_possible=symlink_if_possible)
 
 try:
-    from slimmer import css_slimmer, guessSyntax, html_slimmer, js_slimmer
-    slimmer = 'installed'
+    import slimmer
 except ImportError:
     slimmer = None
+
+try:
+    import cssmin
+except ImportError:
+    cssmin = None
+
+if cssmin is None and slimmer is None:
     import warnings
-    warnings.warn("Can't run tests that depend on slimmer")
+    warnings.warn("Can't run tests that depend on slimmer/cssmin")
 
 
 from django.conf import settings
@@ -32,23 +38,24 @@ from django.template import Template
 from django.template import Context
 import django.template
 
-# Monkey patch the {% load ... %} tag to always reload our code
-# so it can pick up any changes to "settings.py" that happens during
-# unit tests
-_original_get_library = django.template.get_library
-def get_library_wrapper(library_name):
-    if library_name == "django_static":
-        reload(sys.modules['django_static.templatetags.django_static'])
-    return _original_get_library(library_name)
-django.template.get_library = get_library_wrapper
-reload(sys.modules['django.template.defaulttags'])
+## Monkey patch the {% load ... %} tag to always reload our code
+## so it can pick up any changes to "settings.py" that happens during
+## unit tests
+#_original_get_library = django.template.get_library
+#def get_library_wrapper(library_name):
+#    if library_name == "django_static":
+#        reload(sys.modules['django_static.templatetags.django_static'])
+#    return _original_get_library(library_name)
+#django.template.get_library = get_library_wrapper
+#reload(sys.modules['django.template.defaulttags'])
 
 _GIF_CONTENT = 'R0lGODlhBgAJAJEDAGmaywBUpv///////yH5BAEAAAMALAAAAAAGAAkAAAIRnBFwITEoGoyBRWnb\ns27rBRQAOw==\n'
 _GIF_CONTENT_DIFFERENT = 'R0lGODlhBAABAJEAANHV3ufr7qy9xGyiyCH5BAAAAAAALAAAAAAEAAEAAAIDnBAFADs=\n'
 
 #TEST_MEDIA_ROOT = os.path.join(gettempdir(), 'fake_media_root')
 #_original_MEDIA_ROOT = settings.MEDIA_ROOT
-_MISSING = id(get_library_wrapper) # get semi-random mark
+#_MISSING = id(get_library_wrapper) # get semi-random mark
+_marker = object()
 _saved_settings = []
 for name in [ "DEBUG",
               "DJANGO_STATIC",
@@ -59,8 +66,9 @@ for name in [ "DEBUG",
               "DJANGO_STATIC_FILE_PROXY",
               "DJANGO_STATIC_USE_SYMLINK",
               "DJANGO_STATIC_CLOSURE_COMPILER",
-              "DJANGO_STATIC_MEDIA_ROOTS" ]:
-    _saved_settings.append((name, getattr(settings, name, _MISSING)))
+              "DJANGO_STATIC_MEDIA_ROOTS",
+              "DJANGO_STATIC_YUI_COMPRESSOR"]:
+    _saved_settings.append((name, getattr(settings, name, _marker)))
 
 class TestDjangoStatic(TestCase):
 
@@ -73,6 +81,7 @@ class TestDjangoStatic(TestCase):
         self.__added_filepaths.append(filepath)
 
     def setUp(self):
+        _django_static._FILE_MAP = {}
         self.__added_dirs = []
         self.__added_filepaths = []
         #if not os.path.isdir(TEST_MEDIA_ROOT):
@@ -91,8 +100,10 @@ class TestDjangoStatic(TestCase):
         settings.DJANGO_STATIC_USE_SYMLINK = True
         settings.DJANGO_STATIC_FILE_PROXY = None
         settings.DJANGO_STATIC_CLOSURE_COMPILER = None
-        if hasattr(settings, "DJANGO_STATIC_MEDIA_ROOTS"):
-            del settings.DJANGO_STATIC_MEDIA_ROOTS
+        settings.DJANGO_STATIC_YUI_COMPRESSOR = None
+        #if hasattr(settings, "DJANGO_STATIC_MEDIA_ROOTS"):
+        #    del settings.DJANGO_STATIC_MEDIA_ROOTS
+        settings.DJANGO_STATIC_MEDIA_ROOTS = [settings.MEDIA_ROOT]
 
         super(TestDjangoStatic, self).setUp()
 
@@ -108,7 +119,7 @@ class TestDjangoStatic(TestCase):
 
         # restore things for other potential tests
         for name, value in _saved_settings:
-            if value == _MISSING and hasattr(settings, name):
+            if value == _marker and hasattr(settings, name):
                 delattr(settings, name)
             else:
                 setattr(settings, name, value)
@@ -206,7 +217,7 @@ class TestDjangoStatic(TestCase):
         but then you disable DJANGO_STATIC so you should get
           /js/foo.js
         """
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         settings.DEBUG = False
@@ -316,8 +327,28 @@ class TestDjangoStatic(TestCase):
         self._assertProcessedFileExists(dir1, "img100.gif")
         self._assertProcessedFileExists(dir2, "img200.gif")
 
+
+    def test_static_in_multiple_media_roots_with_save_prefix(self):
+        """same as test_static_in_multiple_media_roots() but with a save
+        prefix. """
+
+        dir1 = settings.MEDIA_ROOT
+        dir2 = self._mkdir()
+        settings.DJANGO_STATIC_MEDIA_ROOTS = [ dir1, dir2 ]
+        dir3 = self._mkdir()
         settings.DJANGO_STATIC_SAVE_PREFIX = dir3
+
+        open(dir1 + '/img100.gif', 'w').write(_GIF_CONTENT)
+        open(dir2 + '/img200.gif', 'w').write(_GIF_CONTENT)
+
+        template_as_string = """{% load django_static %}
+        {% staticall %}
+        <img src="img100.gif">
+        <img src="img200.gif">
+        {% endstaticall %}
+        """
         template = Template(template_as_string)
+        context = Context()
         template.render(context).strip()
         self._assertProcessedFileExists(dir3, "img100.gif")
         self._assertProcessedFileExists(dir3, "img200.gif")
@@ -337,11 +368,9 @@ class TestDjangoStatic(TestCase):
         Then, set DJANGO_STATIC_SAVE_PREFIX and verify that the
         processed files are stored there.
         """
-
         dir1 = settings.MEDIA_ROOT
         dir2 = self._mkdir()
-        settings.DJANGO_STATIC_MEDIA_ROOTS = [ dir1, dir2 ]
-        dir3 = self._mkdir()
+        settings.DJANGO_STATIC_MEDIA_ROOTS = [dir1, dir2]
 
         open(dir1 + '/test_A.js', 'w').write("var A=1;")
         open(dir2 + '/test_B.js', 'w').write("var B=1;")
@@ -356,8 +385,24 @@ class TestDjangoStatic(TestCase):
         # MEDIA_ROOTS unless DJANGO_STATIC_SAVE_PREFIX is set
         self._assertProcessedFileExists(dir1, "test_A_test_B.js")
 
+    def test_combined_files_in_multiple_media_roots_with_save_prefix(self):
+        """copy of test_combined_files_in_multiple_media_roots() but this time
+        with a save prefix"""
+        dir1 = settings.MEDIA_ROOT
+        dir2 = self._mkdir()
+        settings.DJANGO_STATIC_MEDIA_ROOTS = [dir1, dir2]
+
+        open(dir1 + '/test_A.js', 'w').write("var A=1;")
+        open(dir2 + '/test_B.js', 'w').write("var B=1;")
+
+        template_as_string = """{% load django_static %}
+        {% slimfile "/test_A.js;/test_B.js" %}
+        """
+        dir3 = self._mkdir()
         settings.DJANGO_STATIC_SAVE_PREFIX = dir3
+
         template = Template(template_as_string)
+        context = Context()
         template.render(context).strip()
         self._assertProcessedFileExists(dir3, "test_A_test_B.js")
 
@@ -616,7 +661,7 @@ class TestDjangoStatic(TestCase):
 
 
     def _test_slimfile_single(self, filename, code, name_prefix='', save_prefix=''):
-        if not slimmer:
+        if slimmer is None and cssmin is None:
             return
 
         test_filepath = settings.MEDIA_ROOT + filename
@@ -994,7 +1039,7 @@ class TestDjangoStatic(TestCase):
         self._test_staticall(filenames, codes)
 
     def test_slimall_basic(self):
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         settings.DEBUG = True
@@ -1007,7 +1052,7 @@ class TestDjangoStatic(TestCase):
         self._test_slimall(filenames, codes)
 
     def test_slimall_basic_css(self):
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         settings.DEBUG = True
@@ -1021,7 +1066,7 @@ class TestDjangoStatic(TestCase):
 
 
     def test_slimall_css_files(self):
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         settings.DEBUG = True
@@ -1108,11 +1153,10 @@ class TestDjangoStatic(TestCase):
                 distinct_medias = set()
             else:
                 distinct_medias = set(css_medias.values())
-            if 'screen' not in distinct_medias:
-                distinct_medias.add('screen')
+            if '' not in distinct_medias:
+                distinct_medias.add('')
             minimum = len(distinct_medias)
-            self.assertEqual(rendered.count('<link '), minimum,
-                             rendered.count('<link '))
+            self.assertEqual(rendered.count('<link '), minimum)
 
         expect_filename = _django_static._combine_filenames(filenames)
         bits = expect_filename.split('.')
@@ -1209,7 +1253,7 @@ class TestDjangoStatic(TestCase):
 
     def test_slim_content(self):
         """test the {% slimcontent %}...{% endslimcontent %} tag"""
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         template_as_string = """{% load django_static %}
@@ -1268,7 +1312,7 @@ class TestDjangoStatic(TestCase):
         self.assertEqual(html_rendered, rendered)
 
     def test_bad_slimcontent_usage(self):
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
 
         # the format argument has to quoted
@@ -1393,7 +1437,7 @@ class TestDjangoStatic(TestCase):
 
         result = slimfile('/foo102.js')
         self.assertTrue(re.findall('/foo102\.\d+\.js', result))
-        if slimmer is not None:
+        if slimmer is not None or cssmin is not None:
             # test the content
             new_filepath = os.path.join(settings.MEDIA_ROOT,
                                         os.path.basename(result))
@@ -1425,7 +1469,7 @@ class TestDjangoStatic(TestCase):
         self.assertTrue(has_optimizer('css'))
         del settings.DJANGO_STATIC_YUI_COMPRESSOR
 
-        self.assertEqual(has_optimizer('css'), bool(slimmer))
+        self.assertEqual(has_optimizer('css'), bool(slimmer or cssmin))
 
         # for javascript
         settings.DJANGO_STATIC_YUI_COMPRESSOR = 'sure'
@@ -1436,7 +1480,7 @@ class TestDjangoStatic(TestCase):
         self.assertTrue(has_optimizer('js'))
         del settings.DJANGO_STATIC_YUI_COMPRESSOR
 
-        self.assertEqual(has_optimizer('js'), bool(slimmer))
+        self.assertEqual(has_optimizer('js'), bool(slimmer or cssmin))
 
         self.assertRaises(ValueError, has_optimizer, 'uh')
 
@@ -1527,7 +1571,7 @@ class TestDjangoStatic(TestCase):
 
         code = 'body { font: big; }'
         new_code = optimize(code, 'css')
-        self.assertTrue(new_code.startswith('BODY'))
+        self.assertTrue(new_code.startswith('body'))
 
         new_code = optimize(code, 'css')
         del settings.DJANGO_STATIC_YUI_COMPRESSOR
@@ -1708,7 +1752,6 @@ class TestDjangoStatic(TestCase):
 
         self.assertTrue(re.findall('/css/foobar\.\d+.css', rendered))
         foobar_content = open(settings.MEDIA_ROOT + rendered).read()
-        #print repr(foobar_content)
         self.assertTrue(not foobar_content.count('\n'))
         self.assertTrue(re.findall('@import "/css/one\.\d+\.css";', foobar_content))
         # notice how we add the '/css/' path to this one!
@@ -1813,7 +1856,6 @@ class TestDjangoStatic(TestCase):
         self.assertTrue(re.findall('/infinity/css/foobar\.\d+.css', rendered))
         foobar_content = open(settings.MEDIA_ROOT + '/special' + \
           rendered.replace('/infinity','')).read()
-        #print repr(foobar_content)
         self.assertTrue(not foobar_content.count('\n'))
         self.assertTrue(re.findall('@import "/infinity/css/one\.\d+\.css";', foobar_content))
         # notice how we add the '/css/' path to this one!
@@ -1889,7 +1931,7 @@ class TestDjangoStatic(TestCase):
         self.assertTrue(re.findall('/fax\.\d+.css', rendered))
         content = codecs.open(settings.MEDIA_ROOT + rendered, 'r', 'utf-8').read()
 
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
         self.assertTrue(u"src:url('/da39a3ee5e.eot');src:local('\u263a')," in content)
 
@@ -1931,11 +1973,10 @@ class TestDjangoStatic(TestCase):
         self.assertTrue(re.findall('/pax\.\d+.css', rendered))
         content = open(settings.MEDIA_ROOT + rendered).read()
         self.assertTrue(re.findall('/bax\.\d+.css', content))
-        #print repr(content)
         generated_filename = re.findall('(/bax\.\d+.css)', content)[0]
         # open the generated new file
         content = codecs.open(settings.MEDIA_ROOT + generated_filename, 'r', 'utf-8').read()
-        if slimmer is None:
+        if slimmer is None and cssmin is None:
             return
         self.assertTrue(u"src:url('/da39a3ee5e.eot');src:local('\u263a')," in content)
 
@@ -2048,6 +2089,110 @@ class TestDjangoStatic(TestCase):
         rendered = template.render(context).strip()
         self.assertTrue(rendered.startswith(u'<script src="//cdn/bar.'))
         self.assertTrue(re.findall("//cdn/bar\.\d+\.js", rendered))
+
+        template_as_string = """{% load django_static %}
+        {% slimall %}
+        <link rel="stylesheet" href="/bar.css"/>
+        {% endslimall %}
+        """
+        template = Template(template_as_string)
+        context = Context()
+        rendered = template.render(context).strip()
+        self.assertTrue('href="//cdn/bar.css"' in rendered)
+        self.assertTrue('media="screen"' not in rendered)
+
+    def test_slimall_with_STATIC_MEDIA_URL(self):
+        settings.DEBUG = False
+        settings.DJANGO_STATIC = True
+        settings.DJANGO_STATIC_MEDIA_URL_ALWAYS = False
+        settings.DJANGO_STATIC_MEDIA_URL = "//cdn"
+
+        filename = "/bar.css"
+        test_filepath = settings.MEDIA_ROOT + filename
+        open(test_filepath, 'w').write('body { color:#ccc; }\n')
+
+        template_as_string = """{% load django_static %}
+        {% slimall %}
+        <link rel="stylesheet" href="/bar.css"/>
+        {% endslimall %}
+        """
+        template = Template(template_as_string)
+        context = Context()
+        rendered = template.render(context).strip()
+
+        self.assertTrue(re.findall("//cdn/bar\.\d+\.css", rendered))
+        self.assertTrue('media="screen"' not in rendered)
+        self.assertTrue('type="text/css"' not in rendered)
+
+    def test_slim_with_jsmin(self):
+        try:
+            import jsmin
+        except ImportError:
+            return
+
+        settings.DJANGO_STATIC = True
+        settings.DJANGO_STATIC_JSMIN = True
+        settings.DJANGO_STATIC_CLOSURE_COMPILER = None
+        settings.DJANGO_STATIC_YUI_COMPRESSOR = None
+
+        dummy_content = "var foo = function(aaa) { return aaa + 1; }"
+        open(settings.MEDIA_ROOT + '/test_A.js', 'w')\
+          .write(dummy_content)
+
+        template_as_string = """{% load django_static %}
+        {% slimfile "/test_A.js" %}
+        """
+        template = Template(template_as_string)
+        context = Context()
+        rendered = template.render(context).strip()
+        self.assertTrue(re.findall("/test_A\.\d+\.js", rendered))
+        content = open(settings.MEDIA_ROOT + rendered).read()
+        self.assertTrue(len(dummy_content) > len(content))
+
+    def test_fail_yui_compressor(self):
+        settings.DJANGO_STATIC = True
+        settings.DJANGO_STATIC_CLOSURE_COMPILER = None
+        settings.DJANGO_STATIC_YUI_COMPRESSOR = 'Something'
+
+        dummy_content = "var foo = function(aaa) { return aaa + 1; }"
+        open(settings.MEDIA_ROOT + '/test_A.js', 'w')\
+          .write(dummy_content)
+
+        template_as_string = """{% load django_static %}
+        {% slimfile "/test_A.js" %}
+        """
+        template = Template(template_as_string)
+        context = Context()
+        rendered = template.render(context).strip()
+        self.assertTrue(re.findall("/test_A\.\d+\.js", rendered))
+        content = open(settings.MEDIA_ROOT + rendered).read()
+        self.assertTrue('ERROR' in content)
+        self.assertTrue(content.count('/*') and content.count('*/'))
+        # find it not compressed
+        self.assertTrue(dummy_content in content)
+
+    def test_fail_closure_compressor(self):
+        settings.DJANGO_STATIC = True
+        settings.DJANGO_STATIC_CLOSURE_COMPILER = 'Something'
+        settings.DJANGO_STATIC_YUI_COMPRESSOR = None
+
+        dummy_content = "var foo = function(aaa) { return aaa + 1; }"
+        open(settings.MEDIA_ROOT + '/test_A.js', 'w')\
+          .write(dummy_content)
+
+        template_as_string = """{% load django_static %}
+        {% slimfile "/test_A.js" %}
+        """
+        template = Template(template_as_string)
+        context = Context()
+        rendered = template.render(context).strip()
+        self.assertTrue(re.findall("/test_A\.\d+\.js", rendered))
+        content = open(settings.MEDIA_ROOT + rendered).read()
+        self.assertTrue('ERROR' in content)
+        self.assertTrue(content.count('/*') and content.count('*/'))
+        # find it not compressed
+        self.assertTrue(dummy_content in content)
+
 
 # These have to be mutable so that we can record that they have been used as
 # global variables.

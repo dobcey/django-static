@@ -19,28 +19,43 @@ from django.template import TemplateSyntaxError
 register = template.Library()
 
 try:
-    from slimmer import (css_slimmer, guessSyntax, html_slimmer, js_slimmer,
-            xhtml_slimmer)
-    slimmer = 'installed'
+    import slimmer
 except ImportError:
     slimmer = None
-    # because if it's import, it's much better to rely on YUI Compressor
-    # and Google Closure compiler.
-    #warnings.warn("slimmer is not installed. (easy_install slimmer)")
+
+try:
+    import cssmin
+except ImportError:
+    cssmin = None
+
+try:
+    import jsmin
+except ImportError:
+    jsmin = None
+
+################################################################################
+# The reason we're setting all of these into `settings` is so that in the code
+# we can do things like `if settings.DJANGO_STATIC:` rather than the verbose
+# and ugly `getattr(settings, 'DJANGO_STATIC')`.
+# And the reason why these aren't set as constants variables is to make the code
+# much easier to test because in the unit tests we can then do
+# settings.DJANGO_STATIC_SAVE_PREFIX = '/tmp/test' and stuff like that.
+settings.DJANGO_STATIC_USE_SYMLINK = getattr(settings, "DJANGO_STATIC_USE_SYMLINK", True)
+settings.DJANGO_STATIC = getattr(settings, 'DJANGO_STATIC', False)
+settings.DJANGO_STATIC_SAVE_PREFIX = getattr(settings, 'DJANGO_STATIC_SAVE_PREFIX', '')
+settings.DJANGO_STATIC_NAME_PREFIX = getattr(settings, 'DJANGO_STATIC_NAME_PREFIX', '')
+settings.DJANGO_STATIC_MEDIA_URL = \
+  getattr(settings, "DJANGO_STATIC_MEDIA_URL", None)
+settings.DJANGO_STATIC_MEDIA_URL_ALWAYS = \
+  getattr(settings, "DJANGO_STATIC_MEDIA_URL_ALWAYS", False)
+
+settings.DJANGO_STATIC_MEDIA_ROOTS = getattr(settings, "DJANGO_STATIC_MEDIA_ROOTS",
+                               [settings.MEDIA_ROOT])
 
 if sys.platform == "win32":
     _CAN_SYMLINK = False
 else:
-    _CAN_SYMLINK = getattr(settings, "DJANGO_STATIC_USE_SYMLINK", True)
-
-DEBUG = settings.DEBUG
-settings.DJANGO_STATIC = getattr(settings, 'DJANGO_STATIC', False)
-DJANGO_STATIC_SAVE_PREFIX = getattr(settings, 'DJANGO_STATIC_SAVE_PREFIX', '')
-DJANGO_STATIC_NAME_PREFIX = getattr(settings, 'DJANGO_STATIC_NAME_PREFIX', '')
-settings.DJANGO_STATIC_MEDIA_URL_ALWAYS = \
-  getattr(settings, "DJANGO_STATIC_MEDIA_URL_ALWAYS", False)
-MEDIA_ROOTS = getattr(settings, "DJANGO_STATIC_MEDIA_ROOTS",
-        [ settings.MEDIA_ROOT ])
+    _CAN_SYMLINK = settings.DJANGO_STATIC_USE_SYMLINK
 
 # Wheree the mapping filename -> annotated_filename is kept
 _FILE_MAP = {}
@@ -96,16 +111,16 @@ class SlimContentNode(template.Node):
             return code
 
         if self.format not in ('css','js','html','xhtml'):
-            self.format = guessSyntax(code)
+            self.format = slimmer.guessSyntax(code)
 
         if self.format == 'css':
-            return css_slimmer(code)
+            return slimmer.css_slimmer(code)
         elif self.format in ('js', 'javascript'):
-            return js_slimmer(code)
+            return slimmer.js_slimmer(code)
         elif self.format == 'xhtml':
-            return xhtml_slimmer(code)
+            return slimmer.xhtml_slimmer(code)
         elif self.format == 'html':
-            return html_slimmer(code)
+            return slimmer.html_slimmer(code)
         else:
             raise TemplateSyntaxError("Unrecognized format for slimming content")
 
@@ -189,7 +204,6 @@ class StaticFileNode(template.Node):
             if settings.DJANGO_STATIC_MEDIA_URL_ALWAYS:
                 return settings.DJANGO_STATIC_MEDIA_URL + filename
             return filename
-
         new_filename = _static_file([x.strip() for x in filename.split(';')],
                             optimize_if_possible=self.optimize_if_possible,
                             symlink_if_possible=self.symlink_if_possible)
@@ -313,8 +327,7 @@ class StaticFilesNode(template.Node):
             try:
                 media_type = media_regex.findall(whole_tag)[0]
             except IndexError:
-                # Because it's so common
-                media_type = 'screen'
+                media_type = ''
 
             for filename in match.groups():
                 new_css_filenames[media_type].append(filename)
@@ -324,10 +337,10 @@ class StaticFilesNode(template.Node):
         new_css_filenames_combined = {}
         if new_css_filenames:
             for media_type, filenames in new_css_filenames.items():
-                new_css_filenames_combined[media_type] = \
-                  _static_file(filenames,
-                               optimize_if_possible=self.optimize_if_possible,
-                               symlink_if_possible=self.symlink_if_possible)
+                r = _static_file(filenames,
+                                 optimize_if_possible=self.optimize_if_possible,
+                                 symlink_if_possible=self.symlink_if_possible)
+                new_css_filenames_combined[media_type] = r
 
 
         if new_js_filename:
@@ -340,8 +353,11 @@ class StaticFilesNode(template.Node):
             code = "%s%s" % (new_tag, code)
 
         for media_type, new_css_filename in new_css_filenames_combined.items():
-            new_tag = '<link rel="stylesheet" type="text/css" media="%s" href="%s"/>' % \
-              (media_type, new_css_filename)
+            extra_params = ''
+            if media_type:
+                extra_params += ' media="%s"' % media_type
+            new_tag = '<link rel="stylesheet"%s href="%s"/>' % \
+              (extra_params, new_css_filename)
             code = "%s%s" % (new_tag, code)
 
         return code
@@ -360,6 +376,8 @@ def _static_file(filename,
 
     def wrap_up(filename):
         if settings.DJANGO_STATIC_MEDIA_URL_ALWAYS:
+            return settings.DJANGO_STATIC_MEDIA_URL + filename
+        elif settings.DJANGO_STATIC_MEDIA_URL:
             return settings.DJANGO_STATIC_MEDIA_URL + filename
         return filename
 
@@ -382,7 +400,7 @@ def _static_file(filename,
     # to bother with when in DEBUG mode because it adds one more
     # unnecessary operation.
     if new_filename:
-        if DEBUG:
+        if settings.DEBUG:
             # need to check if the original has changed
             old_new_filename = new_filename
             new_filename = None
@@ -407,7 +425,7 @@ def _static_file(filename,
                 filepath, path = _find_filepath_in_roots(each)
                 if not filepath:
                     raise OSError("Failed to find %s in %s" % (each,
-                        ",".join(MEDIA_ROOTS)))
+                        ",".join(settings.DJANGO_STATIC_MEDIA_ROOTS)))
 
                 if extension:
                     if os.path.splitext(filepath)[1] != extension:
@@ -423,17 +441,20 @@ def _static_file(filename,
             # Set the root path of the combined files to the first entry
             # in the MEDIA_ROOTS list. This way django-static behaves a
             # little more predictible.
-            path = MEDIA_ROOTS[0]
+            path = settings.DJANGO_STATIC_MEDIA_ROOTS[0]
             new_m_time = max(each_m_times)
 
         else:
             filepath, path = _find_filepath_in_roots(filename)
             if not filepath:
                 if warn_no_file:
-                    msg = "Can't find file %s in %s" % (filename, ",".join(MEDIA_ROOTS))
+                    msg = "Can't find file %s in %s" % \
+                      (filename, ",".join(settings.DJANGO_STATIC_MEDIA_ROOTS))
                     warnings.warn(msg)
                 return file_proxy(wrap_up(filename),
-                                  **dict(fp_default_kwargs, filepath=filepath, notfound=True))
+                                  **dict(fp_default_kwargs,
+                                         filepath=filepath,
+                                         notfound=True))
 
             new_m_time = os.stat(filepath)[stat.ST_MTIME]
 
@@ -452,22 +473,23 @@ def _static_file(filename,
             new_filename = ''.join([apart[0],
                                 '.%s' % new_m_time,
                                 apart[1]])
-
-            fileinfo = (DJANGO_STATIC_NAME_PREFIX + new_filename, new_m_time)
+            fileinfo = (settings.DJANGO_STATIC_NAME_PREFIX + new_filename,
+                        new_m_time)
 
             _FILE_MAP[map_key] = fileinfo
             if old_new_filename:
-                old_new_filename = old_new_filename.replace(DJANGO_STATIC_NAME_PREFIX, '')
+                old_new_filename = old_new_filename.replace(
+                                      settings.DJANGO_STATIC_NAME_PREFIX, '')
                 old_new_filepath = _filename2filepath(old_new_filename,
-                        DJANGO_STATIC_SAVE_PREFIX or path)
+                        settings.DJANGO_STATIC_SAVE_PREFIX or path)
                 if not os.path.isdir(os.path.dirname(old_new_filepath)):
                     _mkdir(os.path.dirname(old_new_filepath))
 
                 if os.path.isfile(old_new_filepath):
                     os.remove(old_new_filepath)
-
     new_filepath = _filename2filepath(new_filename,
-            DJANGO_STATIC_SAVE_PREFIX or path)
+            settings.DJANGO_STATIC_SAVE_PREFIX or path)
+
     if not os.path.isdir(os.path.dirname(new_filepath)):
         _mkdir(os.path.dirname(new_filepath))
 
@@ -518,28 +540,16 @@ def _static_file(filename,
                     this_filename = os.path.join(os.path.dirname(filename), this_filename)
                 optimize_again = optimize_if_possible and \
                                  this_filename.lower().endswith('.css') or False
-                #print "this_filename", this_filename
-                #print "optimize_again", optimize_again
                 new_filename = _static_file(this_filename,
                                             symlink_if_possible=symlink_if_possible,
                                             optimize_if_possible=optimize_again,
-                                            warn_no_file=DEBUG and True or False)
-                #print "new_filename", new_filename
-                #print "\n"
+                                            warn_no_file=settings.DEBUG and True or False)
                 return match.group().replace(replace_with, new_filename)
 
-            #print "FILENAME"
-            #print filename
-            #print "CONTENT (PRE)"
-            #print content
             content = REFERRED_CSS_URLS_REGEX.sub(replacer, content)
-            #print "(AFTER)"
             content = REFERRED_CSS_URLLESS_IMPORTS_REGEX.sub(replacer, content)
-            #print "COMPLETELY AFTER"
-            #print content
 
-
-        elif slimmer:
+        elif slimmer or cssmin:
             raise ValueError(
               "Unable to slimmer file %s. Unrecognized extension" % new_filename)
         #print "** STORING:", new_filepath
@@ -593,7 +603,7 @@ def _static_file(filename,
         #print "** STORING COPY:", new_filepath
         shutil.copyfile(filepath, new_filepath)
 
-    return file_proxy(wrap_up(DJANGO_STATIC_NAME_PREFIX + new_filename),
+    return file_proxy(wrap_up(settings.DJANGO_STATIC_NAME_PREFIX + new_filename),
                       **dict(fp_default_kwargs, new=True,
                              filepath=new_filepath, checked=True))
 
@@ -619,7 +629,7 @@ def _mkdir(newdir):
 
 def _find_filepath_in_roots(filename):
     """Look for filename in all MEDIA_ROOTS, and return the first one found."""
-    for root in MEDIA_ROOTS:
+    for root in settings.DJANGO_STATIC_MEDIA_ROOTS:
         filepath = _filename2filepath(filename, root)
         if os.path.isfile(filepath):
             return filepath, root
@@ -711,34 +721,40 @@ def has_optimizer(type_):
     if type_ == CSS:
         if getattr(settings, 'DJANGO_STATIC_YUI_COMPRESSOR', None):
             return True
-        return slimmer is not None
+        return slimmer is not None or cssmin is not None
     elif type_ == JS:
         if getattr(settings, 'DJANGO_STATIC_CLOSURE_COMPILER', None):
             return True
         if getattr(settings, 'DJANGO_STATIC_YUI_COMPRESSOR', None):
             return True
-
-        return slimmer is not None
+        if getattr(settings, 'DJANGO_STATIC_JSMIN', None):
+            assert jsmin is not None, "jsmin not installed"
+            return True
+        return slimmer is not None or cssmin is not None
     else:
         raise ValueError("Invalid type %r" % type_)
 
 def optimize(content, type_):
     if type_ == CSS:
-        if getattr(settings, 'DJANGO_STATIC_YUI_COMPRESSOR', None):
+        if cssmin is not None:
+            return _run_cssmin(content)
+        elif getattr(settings, 'DJANGO_STATIC_YUI_COMPRESSOR', None):
             return _run_yui_compressor(content, type_)
-        return css_slimmer(content)
+        return slimmer.css_slimmer(content)
     elif type_ == JS:
         if getattr(settings, 'DJANGO_STATIC_CLOSURE_COMPILER', None):
             return _run_closure_compiler(content)
         if getattr(settings, 'DJANGO_STATIC_YUI_COMPRESSOR', None):
             return _run_yui_compressor(content, type_)
-        return js_slimmer(content)
+        if getattr(settings, 'DJANGO_STATIC_JSMIN', None):
+            return _run_jsmin(content)
+        return slimmer.js_slimmer(content)
     else:
         raise ValueError("Invalid type %r" % type_)
 
+CLOSURE_COMMAND_TEMPLATE = "java -jar %(jarfile)s"
 def _run_closure_compiler(jscode):
-
-    cmd = "java -jar %s" % settings.DJANGO_STATIC_CLOSURE_COMPILER
+    cmd = CLOSURE_COMMAND_TEMPLATE % {'jarfile': settings.DJANGO_STATIC_CLOSURE_COMPILER}
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
         (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(jscode))
@@ -751,9 +767,11 @@ def _run_closure_compiler(jscode):
 
     return _unicode_switch(stdoutdata)
 
+YUI_COMMAND_TEMPLATE = "java -jar %(jarfile)s --type=%(type)s"
 def _run_yui_compressor(code, type_):
-
-    cmd = "java -jar %s --type=%s" % (settings.DJANGO_STATIC_YUI_COMPRESSOR, type_)
+    cmd = YUI_COMMAND_TEMPLATE % \
+      {'jarfile': settings.DJANGO_STATIC_YUI_COMPRESSOR,
+       'type': type_}
     proc = Popen(cmd, shell=True, stdout=PIPE, stdin=PIPE, stderr=PIPE)
     try:
         (stdoutdata, stderrdata) = proc.communicate(_unicode_switch(code))
@@ -769,3 +787,11 @@ def _run_yui_compressor(code, type_):
         return "/* ERRORS WHEN RUNNING YUI COMPRESSOR\n" + stderrdata + '\n*/\n' + code
 
     return _unicode_switch(stdoutdata)
+
+def _run_cssmin(code):
+    output = cssmin.cssmin(code)
+    return output
+
+def _run_jsmin(code):
+    output = jsmin.jsmin(code)
+    return output
